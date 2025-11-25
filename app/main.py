@@ -1,14 +1,40 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import os
+from dotenv import load_dotenv
+from fastapi import Security, status
+from fastapi.security import APIKeyHeader
+
+
 from app.schemas import AskRequest, AskResponse
 from app.rag import ingest_text, retrieve
 
 app = FastAPI(title="Legal Document Analysis Agent")
+
+load_dotenv()
+API_TOKEN = os.getenv("API_TOKEN")
+
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    if API_TOKEN is None:
+        # مشكلة إعدادات، مش مستخدم
+        raise HTTPException(
+            status_code=500,
+            detail="API token is not configured on the server.",
+        )
+    if api_key != API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key.",
+        )
+    return api_key
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +50,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.post("/ingest")
 @limiter.limit("10/minute")
-async def ingest(request: Request, file: UploadFile = File(...)):
+async def ingest(request: Request, file: UploadFile = File(...), _: str = Depends(verify_api_key),):
     try:
         content = await file.read()
         text = content.decode("utf-8", errors="ignore")
@@ -40,7 +66,7 @@ async def ingest(request: Request, file: UploadFile = File(...)):
 
 @app.post("/ask", response_model=AskResponse)
 @limiter.limit("30/minute")
-async def ask(request: Request, req: AskRequest):
+async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key),):
     try:
         docs = retrieve(req.doc_id, req.question)
         if not docs:
