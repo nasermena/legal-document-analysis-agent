@@ -3,13 +3,16 @@ from typing import List
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+from dotenv import load_dotenv
+load_dotenv()
 
 CHROMA_DIR = "data/chroma"
 
 def _get_db():
-    embeddings = OpenAIEmbeddings()  # يحتاج OPENAI_API_KEY
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
 def ingest_text(raw_text: str) -> str:
