@@ -1,20 +1,24 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 
 import os
 from dotenv import load_dotenv
 from fastapi import Security, status
 from fastapi.security import APIKeyHeader
 
+from time import time
 
 from app.schemas import AskRequest, AskResponse
 from app.rag import ingest_text, retrieve
 
 app = FastAPI(title="Legal Document Analysis Agent")
+
+logger.add("logs/app.log", rotation="1 MB", retention="7 days", enqueue=True)
 
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
@@ -46,7 +50,32 @@ app.add_middleware(
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning(
+        f"Rate limit exceeded for {request.client.host} on {request.method} {request.url.path}"
+    )
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Too many requests. Please slow down and try again.",
+            "error": "rate_limit_exceeded",
+        },
+    )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        process_ms = (time() - start) * 1000
+        logger.info(
+            f"{request.client.host} {request.method} {request.url.path} "
+            f"status={getattr(response, 'status_code', 'N/A')} time={process_ms:.2f}ms"
+        )
 
 @app.post("/ingest")
 @limiter.limit("10/minute")
