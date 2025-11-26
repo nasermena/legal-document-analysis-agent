@@ -13,8 +13,15 @@ from fastapi.security import APIKeyHeader
 
 from time import time
 
-from app.schemas import AskRequest, AskResponse
+from app.schemas import (
+    AskRequest,
+    AskResponse,
+    AgentAnalyzeRequest,
+    AgentAnalyzeResponse,
+)
 from app.rag import ingest_text, retrieve
+
+from app.agent import run_legal_agent
 
 app = FastAPI(title="Legal Document Analysis Agent")
 
@@ -153,3 +160,31 @@ async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key
     except Exception as e:
         logger.exception(e)
         raise HTTPException(500, "Failed to answer question")
+    
+@app.post("/agent/analyze", response_model=AgentAnalyzeResponse)
+@limiter.limit("15/minute")
+async def agent_analyze(
+    request: Request,
+    req: AgentAnalyzeRequest,
+    _: str = Depends(verify_api_key),
+):
+    """
+    LangChain-based legal analysis endpoint.
+
+    Uses a tool-calling agent that:
+    - Calls `retrieve_contract_context` to get clauses
+    - Then generates a legal answer using the LLM
+    """
+    try:
+        result = run_legal_agent(
+            question=req.question,
+            doc_id=req.doc_id,
+            task_type=req.task_type,
+        )
+        return AgentAnalyzeResponse(
+            answer=result["answer"],
+            tool_calls=result.get("tool_calls", []),
+        )
+    except Exception as e:
+        logger.exception(e)
+        raise HTTPException(500, "Failed to run legal agent")
