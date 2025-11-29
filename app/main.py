@@ -13,6 +13,11 @@ from fastapi.security import APIKeyHeader
 
 from time import time
 
+from typing import List
+import io
+from pypdf import PdfReader
+from docx import Document as DocxDocument
+
 from app.schemas import (
     AskRequest,
     AskResponse,
@@ -34,7 +39,6 @@ api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(api_key_header)):
     if API_TOKEN is None:
-        # مشكلة إعدادات، مش مستخدم
         raise HTTPException(
             status_code=500,
             detail="API token is not configured on the server.",
@@ -84,24 +88,76 @@ async def log_requests(request: Request, call_next):
             f"status={getattr(response, 'status_code', 'N/A')} time={process_ms:.2f}ms"
         )
 
-@app.post("/ingest")
-@limiter.limit("10/minute")
-async def ingest(request: Request, file: UploadFile = File(...), _: str = Depends(verify_api_key),):
-    try:
-        content = await file.read()
-        text = content.decode("utf-8", errors="ignore")
-        if not text.strip():
-            raise HTTPException(400, "Empty document")
+def _extract_text_from_bytes(filename: str, content_type: str | None, data: bytes) -> str:
+    """
+    يحوّل الملف (PDF / DOCX / TXT) إلى نص عادي.
+    """
+    name = (filename or "").lower()
+    ctype = (content_type or "").lower()
 
-        doc_id = ingest_text(text)
+    # 1) PDF
+    if "pdf" in ctype or name.endswith(".pdf"):
+        text_parts: list[str] = []
+        reader = PdfReader(io.BytesIO(data))
+        for page in reader.pages:
+            # بعض الصفحات ممكن ترجع None → نحميها بـ or ""
+            text_parts.append(page.extract_text() or "")
+        return "\n".join(text_parts)
+
+    # 2) Word (DOCX)
+    if "wordprocessingml" in ctype or name.endswith(".docx"):
+        doc = DocxDocument(io.BytesIO(data))
+        paragraphs = [p.text for p in doc.paragraphs if p.text]
+        return "\n".join(paragraphs)
+
+    # 3) افتراضيًا: نعامل الملف كـ نص عادي (TXT)
+    try:
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        # لو حتى UTF-8 ما نفع، نرجع نص فاضي
+        return ""
+
+@limiter.limit("10/minute")
+@app.post("/ingest")
+async def ingest(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    _: str = Depends(verify_api_key),
+):
+    try:
+        all_text_parts: list[str] = []
+
+        for f in files:
+            raw_bytes = await f.read()
+            if not raw_bytes:
+                continue
+
+            text = _extract_text_from_bytes(
+                filename=f.filename or "",
+                content_type=f.content_type,
+                data=raw_bytes,
+            )
+
+            if text.strip():
+                header = f"\n\n===== FILE: {f.filename} =====\n\n"
+                all_text_parts.append(header + text)
+
+        if not all_text_parts:
+            raise HTTPException(400, "All uploaded files are empty or unsupported format")
+
+        combined_text = "\n".join(all_text_parts)
+
+        doc_id = ingest_text(combined_text)
         return {"doc_id": doc_id}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(e)
-        raise HTTPException(500, "Failed to ingest document")
+        raise HTTPException(500, "Failed to ingest document(s)")
 
-@app.post("/ask", response_model=AskResponse)
 @limiter.limit("30/minute")
+@app.post("/ask", response_model=AskResponse)
 async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key),):
     try:
         docs = retrieve(req.doc_id, req.question)
@@ -111,10 +167,8 @@ async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key
                 sources=[],
             )
 
-        # نجهّز المصادر كما هي (أول 200 حرف من كل جزء)
         sources = [d.page_content[:200] for d in docs]
 
-        # -------- 1) نحاول نصنع جواب مختصر من أول جزء --------
         main_doc = docs[0]
         content = main_doc.page_content.replace("\n", " ")
         sentences = [s.strip() for s in content.split(".") if s.strip()]
@@ -125,7 +179,6 @@ async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key
         else:
             direct_answer = "Direct answer: (could not build a short answer from the retrieved text)."
 
-        # -------- 2) نعرض البنود المرتبطة بشكل مرتب --------
         lines: list[str] = []
         lines.append(f"Question: {req.question}")
         lines.append("")
@@ -161,20 +214,13 @@ async def ask(request: Request, req: AskRequest, _: str = Depends(verify_api_key
         logger.exception(e)
         raise HTTPException(500, "Failed to answer question")
     
-@app.post("/agent/analyze", response_model=AgentAnalyzeResponse)
 @limiter.limit("15/minute")
+@app.post("/agent/analyze", response_model=AgentAnalyzeResponse)
 async def agent_analyze(
     request: Request,
     req: AgentAnalyzeRequest,
     _: str = Depends(verify_api_key),
 ):
-    """
-    LangChain-based legal analysis endpoint.
-
-    Uses a tool-calling agent that:
-    - Calls `retrieve_contract_context` to get clauses
-    - Then generates a legal answer using the LLM
-    """
     try:
         result = run_legal_agent(
             question=req.question,

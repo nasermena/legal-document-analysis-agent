@@ -12,3 +12,5 @@ langchain-community
 langchain-openai
 langchain-text-splitters
 langchain-ollama
+pypdf
+python-docx

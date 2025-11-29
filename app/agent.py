@@ -10,14 +10,8 @@ load_dotenv()
 
 
 def _get_llm() -> ChatOllama:
-    """
-    Create the local LLM used by the legal agent.
-
-    Requires that Ollama is running locally and the model is pulled.
-    Example pulled model (as in your machine): `llama3:latest`
-    """
     return ChatOllama(
-        model="llama3:latest",  # نفس الاسم الظاهر في `ollama list`
+        model="llama3:latest",
         temperature=0,
     )
 
@@ -26,7 +20,6 @@ _llm: ChatOllama | None = None
 
 
 def get_llm() -> ChatOllama:
-    """Return a singleton LLM instance."""
     global _llm
     if _llm is None:
         _llm = _get_llm()
@@ -34,10 +27,6 @@ def get_llm() -> ChatOllama:
 
 
 def _build_context(doc_id: str, question: str) -> tuple[str, List[str]]:
-    """
-    Use our RAG retriever to get relevant clauses and build a context string.
-    Returns (context_text, snippets_list).
-    """
     docs = retrieve(doc_id, question)
     if not docs:
         return "No relevant clauses were found for this question.", []
@@ -49,8 +38,6 @@ def _build_context(doc_id: str, question: str) -> tuple[str, List[str]]:
     context = "\n\n---\n\n".join(snippets)
     return context, snippets
 
-
-# إعداد البرومبت اللي رح نستخدمه مع ChatOllama
 LEGAL_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
@@ -85,16 +72,7 @@ def run_legal_agent(
     doc_id: str,
     task_type: str = "general",
 ) -> Dict[str, Any]:
-    """
-    High-level helper used by the FastAPI endpoint.
-    1) يستدعي RAG عشان يجيب الـ context.
-    2) يبني برومبت ويدّيه لـ ChatOllama.
-    3) يرجّع الجواب + المقاطع المستخدمة كمصدر.
-    """
-    # 1) نبني الـ context من الـ RAG
     context, snippets = _build_context(doc_id, question)
-
-    # 2) نجهّز الـ chain (prompt -> LLM) وننفّذه
     llm = get_llm()
     chain = LEGAL_PROMPT | llm
 
@@ -110,5 +88,5 @@ def run_legal_agent(
 
     return {
         "answer": answer_text,
-        "tool_calls": snippets,  # بدل tool calls الفعلية، نرجّع المقاطع اللي استخدمناها
+        "tool_calls": snippets,
     }
